@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+option go_package = ".;types";
+
+message WorkerEvent {
+  string session = 1;
+  string content = 2;
+}

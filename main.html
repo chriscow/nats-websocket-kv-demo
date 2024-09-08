@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        #chat-box {
+            height: 300px;
+            border: 1px solid #ccc;
+            overflow-y: scroll;
+            margin-bottom: 10px;
+            padding: 10px;
+        }
+        #message-input {
+            width: 70%;
+            padding: 5px;
+        }
+        #send-button {
+            padding: 5px 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Chat Client</h1>
+    <div id="chat-box"></div>
+    <input type="text" id="message-input" placeholder="Type your message...">
+    <button id="send-button">Send</button>
+
+    <script>
+        const chatBox = document.getElementById('chat-box');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+
+        let socket;
+
+        function connectWebSocket() {
+            socket = new WebSocket('ws://localhost:8080/ws');
+
+            socket.onopen = function(e) {
+                console.log('Connected to WebSocket server');
+                appendMessage('System: Connected to chat server');
+            };
+
+            socket.onmessage = function(event) {
+                appendMessage(event.data);
+            };
+
+            socket.onclose = function(event) {
+                if (event.wasClean) {
+                    appendMessage(`System: Connection closed cleanly, code=${event.code}, reason=${event.reason}`);
+                } else {
+                    appendMessage('System: Connection died');
+                }
+                setTimeout(connectWebSocket, 5000); // Try to reconnect after 5 seconds
+            };
+
+            socket.onerror = function(error) {
+                console.error(`WebSocket error: ${error.message}`);
+                appendMessage('System: WebSocket error occurred');
+            };
+        }
+
+        function appendMessage(message) {
+            const messageElement = document.createElement('div');
+            messageElement.textContent = message;
+            chatBox.appendChild(messageElement);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (message && socket.readyState === WebSocket.OPEN) {
+                socket.send(message);
+                messageInput.value = '';
+            }
+        }
+
+        sendButton.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        connectWebSocket();
+    </script>
+</body>
+</html>
