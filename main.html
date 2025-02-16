@@ -3,93 +3,263 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat Client</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        #chat-box {
-            height: 300px;
-            border: 1px solid #ccc;
-            overflow-y: scroll;
-            margin-bottom: 10px;
-            padding: 10px;
-        }
-        #message-input {
-            width: 70%;
-            padding: 5px;
-        }
-        #send-button {
-            padding: 5px 10px;
-        }
-    </style>
-</head>
-<body>
-    <h1>Chat Client</h1>
-    <div id="chat-box"></div>
-    <input type="text" id="message-input" placeholder="Type your message...">
-    <button id="send-button">Send</button>
-
-    <script>
-        const chatBox = document.getElementById('chat-box');
-        const messageInput = document.getElementById('message-input');
-        const sendButton = document.getElementById('send-button');
-
-        let socket;
-
-        function connectWebSocket() {
-            socket = new WebSocket('ws://localhost:8080/ws');
-
-            socket.onopen = function(e) {
-                console.log('Connected to WebSocket server');
-                appendMessage('System: Connected to chat server');
-            };
-
-            socket.onmessage = function(event) {
-                appendMessage(event.data);
-            };
-
-            socket.onclose = function(event) {
-                if (event.wasClean) {
-                    appendMessage(`System: Connection closed cleanly, code=${event.code}, reason=${event.reason}`);
-                } else {
-                    appendMessage('System: Connection died');
-                }
-                setTimeout(connectWebSocket, 5000); // Try to reconnect after 5 seconds
-            };
-
-            socket.onerror = function(error) {
-                console.error(`WebSocket error: ${error.message}`);
-                appendMessage('System: WebSocket error occurred');
-            };
-        }
-
-        function appendMessage(message) {
+    <title>NATS Demo</title>
+    <script type="module">
+        import { connect, StringCodec, headers } from "https://cdn.jsdelivr.net/npm/nats.ws/esm/nats.js";
+        
+        // Utility function to append messages
+        function appendMessage(elementId, message) {
+            const chatBox = document.getElementById(elementId);
             const messageElement = document.createElement('div');
             messageElement.textContent = message;
             chatBox.appendChild(messageElement);
             chatBox.scrollTop = chatBox.scrollHeight;
         }
 
-        function sendMessage() {
-            const message = messageInput.value.trim();
-            if (message && socket.readyState === WebSocket.OPEN) {
-                socket.send(message);
-                messageInput.value = '';
+        // WebSocket Demo
+        let wsSocket;
+        const wsStatus = document.getElementById('ws-status');
+        const wsMessageInput = document.getElementById('ws-message-input');
+        const wsSendButton = document.getElementById('ws-send-button');
+
+        function connectWebSocket() {
+            wsSocket = new WebSocket('ws://localhost:2304/ws');
+
+            wsSocket.onopen = function(e) {
+                console.log('Connected to WebSocket server');
+                wsStatus.textContent = 'Connected to WebSocket server';
+                appendMessage('ws-chat-box', 'System: Connected to chat server');
+            };
+
+            wsSocket.onmessage = function(event) {
+                appendMessage('ws-chat-box', event.data);
+            };
+
+            wsSocket.onclose = function(event) {
+                wsStatus.textContent = 'Disconnected';
+                if (event.wasClean) {
+                    appendMessage('ws-chat-box', `System: Connection closed cleanly, code=${event.code}, reason=${event.reason}`);
+                } else {
+                    appendMessage('ws-chat-box', 'System: Connection died');
+                }
+                setTimeout(connectWebSocket, 5000);
+            };
+
+            wsSocket.onerror = function(error) {
+                wsStatus.textContent = 'Error';
+                console.error(`WebSocket error: ${error.message}`);
+                appendMessage('ws-chat-box', 'System: WebSocket error occurred');
+            };
+        }
+
+        function sendWsMessage() {
+            const message = wsMessageInput.value.trim();
+            if (message && wsSocket.readyState === WebSocket.OPEN) {
+                wsSocket.send(message);
+                wsMessageInput.value = '';
             }
         }
 
-        sendButton.addEventListener('click', sendMessage);
-        messageInput.addEventListener('keypress', function(e) {
+        wsSendButton.addEventListener('click', sendWsMessage);
+        wsMessageInput.addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
-                sendMessage();
+                sendWsMessage();
             }
         });
 
+        // Direct NATS Demo
+        let nc;
+        let js;
+        let kv;
+        const sc = StringCodec();
+        const natsStatus = document.getElementById('nats-status');
+        const natsMessageInput = document.getElementById('nats-message-input');
+        const natsSendButton = document.getElementById('nats-send-button');
+        const kvKeyInput = document.getElementById('kv-key-input');
+        const kvValueInput = document.getElementById('kv-value-input');
+        const kvSetButton = document.getElementById('kv-set-button');
+        const kvGetButton = document.getElementById('kv-get-button');
+
+        async function connectNats() {
+            try {
+                console.log("Attempting to connect to NATS...");
+                // Connect to NATS
+                nc = await connect({ 
+                    servers: ['ws://localhost:9222'],
+                    debug: true,
+                    timeout: 5000, // 5 second timeout
+                    maxReconnectAttempts: -1, // infinite reconnect attempts
+                });
+                console.log("Successfully connected to NATS");
+                natsStatus.textContent = 'Connected to NATS';
+                appendMessage('nats-chat-box', 'System: Connected to NATS');
+
+                // Create JetStream context
+                console.log("Creating JetStream context...");
+                js = nc.jetstream();
+
+                // Create or get KV store
+                try {
+                    console.log("Setting up KV store...");
+                    const jsm = await js.jetstreamManager();
+                    await jsm.streams.add({ name: "KV", subjects: ["kv.*"] });
+                    kv = await js.views.kv("KV");
+                    console.log("KV store setup complete");
+                } catch (err) {
+                    console.error("Error setting up KV:", err);
+                    appendMessage('nats-chat-box', `System: KV setup error: ${err.message}`);
+                }
+
+                // Subscribe to direct messages
+                console.log("Setting up message subscription...");
+                const sub = nc.subscribe("direct.messages");
+                (async () => {
+                    for await (const msg of sub) {
+                        appendMessage('nats-chat-box', `Received: ${sc.decode(msg.data)}`);
+                    }
+                })();
+                console.log("Message subscription active");
+
+            } catch (err) {
+                natsStatus.textContent = 'Connection Failed';
+                console.error(`Error connecting to NATS:`, err);
+                appendMessage('nats-chat-box', `System: NATS connection error: ${err.message}`);
+                setTimeout(connectNats, 5000);
+            }
+        }
+
+        async function sendNatsMessage() {
+            const message = natsMessageInput.value.trim();
+            if (message && nc) {
+                try {
+                    await nc.publish("direct.messages", sc.encode(message));
+                    natsMessageInput.value = '';
+                    appendMessage('nats-chat-box', `Sent: ${message}`);
+                } catch (err) {
+                    console.error(`Error sending message: ${err}`);
+                    appendMessage('nats-chat-box', `Error sending message: ${err.message}`);
+                }
+            }
+        }
+
+        async function setKV() {
+            const key = kvKeyInput.value.trim();
+            const value = kvValueInput.value.trim();
+            if (key && value && kv) {
+                try {
+                    await kv.put(key, sc.encode(value));
+                    appendMessage('nats-chat-box', `KV Set: ${key} = ${value}`);
+                } catch (err) {
+                    console.error(`Error setting KV: ${err}`);
+                    appendMessage('nats-chat-box', `Error setting KV: ${err.message}`);
+                }
+            }
+        }
+
+        async function getKV() {
+            const key = kvKeyInput.value.trim();
+            if (key && kv) {
+                try {
+                    const entry = await kv.get(key);
+                    if (entry) {
+                        appendMessage('nats-chat-box', `KV Get: ${key} = ${sc.decode(entry.value)}`);
+                    } else {
+                        appendMessage('nats-chat-box', `KV Get: ${key} not found`);
+                    }
+                } catch (err) {
+                    console.error(`Error getting KV: ${err}`);
+                    appendMessage('nats-chat-box', `Error getting KV: ${err.message}`);
+                }
+            }
+        }
+
+        natsSendButton.addEventListener('click', sendNatsMessage);
+        natsMessageInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendNatsMessage();
+            }
+        });
+
+        kvSetButton.addEventListener('click', setKV);
+        kvGetButton.addEventListener('click', getKV);
+
+        // Initialize connections
         connectWebSocket();
+        connectNats();
     </script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .demo-container {
+            display: flex;
+            gap: 20px;
+        }
+        .demo-section {
+            flex: 1;
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 5px;
+        }
+        .chat-box {
+            height: 300px;
+            border: 1px solid #ccc;
+            overflow-y: scroll;
+            margin-bottom: 10px;
+            padding: 10px;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .input-group input {
+            flex: 1;
+            padding: 5px;
+        }
+        .input-group button {
+            padding: 5px 10px;
+        }
+        .status {
+            color: #666;
+            font-style: italic;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>NATS Demo</h1>
+    <div class="demo-container">
+        <!-- WebSocket Demo Section -->
+        <div class="demo-section">
+            <h2>WebSocket Demo</h2>
+            <div class="status" id="ws-status">Disconnected</div>
+            <div class="chat-box" id="ws-chat-box"></div>
+            <div class="input-group">
+                <input type="text" id="ws-message-input" placeholder="Type your message...">
+                <button id="ws-send-button">Send</button>
+            </div>
+        </div>
+
+        <!-- Direct NATS Demo Section -->
+        <div class="demo-section">
+            <h2>Direct NATS Demo</h2>
+            <div class="status" id="nats-status">Disconnected</div>
+            <div class="chat-box" id="nats-chat-box"></div>
+            <div class="input-group">
+                <input type="text" id="nats-message-input" placeholder="Type your message...">
+                <button id="nats-send-button">Send</button>
+            </div>
+            <div class="input-group">
+                <input type="text" id="kv-key-input" placeholder="Key">
+                <input type="text" id="kv-value-input" placeholder="Value">
+                <button id="kv-set-button">Set KV</button>
+                <button id="kv-get-button">Get KV</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

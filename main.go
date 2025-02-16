@@ -2,23 +2,35 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	types "go-nuts/types"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 )
 
-
-
 func main() {
+	log.Println("Starting application...")
+
+	// Define a command-line flag for the mode
+	mode := flag.String("mode", "all", "Mode of operation: ws, worker, or all")
+	flag.Parse()
+
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("Error loading .env file: ", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -29,7 +41,7 @@ func main() {
 	}
 	nc, err := nats.Connect(nats.DefaultURL)
 	if err != nil {
-		log.Fatal("Error conencting to NATS server: ", err)
+		log.Fatal("Error connecting to NATS server: ", err)
 	}
 	defer nc.Close()
 	js, err := jetstream.New(nc)
@@ -46,10 +58,10 @@ func main() {
 		log.Fatal("Error cannot creating session stream: ", err)
 	}
 
-	// Initialize backend mode
+	// Initialize backend mode based on the flag
 	var handleWS = false
 	var handleWorker = false
-	switch backendMode := os.Getenv("MODE"); backendMode {
+	switch *mode {
 	case "ws":
 		log.Println("Running WebSocket mode")
 		handleWS = true
@@ -64,6 +76,7 @@ func main() {
 
 	// Handle worker events
 	if handleWorker {
+		log.Println("Setting up worker stream and consumer...")
 		// Stream
 		sWorker, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:        "worker",
@@ -86,11 +99,13 @@ func main() {
 
 		// Consumer handler
 		cc, err := consWorker.Consume(func(msg jetstream.Msg) {
+			log.Println("Received a message from NATS...")
 			WorkerEvent := types.WorkerEvent{}
 			if err := proto.Unmarshal(msg.Data(), &WorkerEvent); err != nil {
 				log.Fatal("Error unmarshalling message from worker: ", err)
 				msg.Nak()
 			}
+			log.Printf("Processing NATS message for session: %s, content: %s", WorkerEvent.Session, WorkerEvent.Content)
 			if err := handleWorkerEvent(ctx, &WorkerEvent, js); err != nil {
 				log.Fatal("Error handling worker event: ", err)
 				msg.Nak()
@@ -107,6 +122,7 @@ func main() {
 
 	// Handle WebSocket requests
 	if handleWS {
+		log.Println("Setting up WebSocket server...")
 		upgrader := &websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -115,18 +131,26 @@ func main() {
 		http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 			handleWebSocket(w, r, upgrader, js, sSess)
 		})
+
+		// Handle healthcheck requests
+		http.HandleFunc("/_healthz", handleHealthz)
+
+		// Initialize HTTP listener
+		httpPort := os.Getenv("PORT")
+		if httpPort == "" {
+			httpPort = "8080"
+		}
+		log.Printf("Serving HTTP on %v\n", httpPort)
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%v", httpPort), nil))
 	}
 
-	// Handle healthcheck requests
-	http.HandleFunc("/_healthz", handleHealthz)
+	// Block until a signal is received
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	log.Println("Application is running. Waiting for shutdown signal...")
+	<-sigChan
 
-	// Initialize HTTP listener
-	httpPort := os.Getenv("PORT")
-	if httpPort == "" {
-		httpPort = "8080"
-	}
-	log.Printf("Serving HTTP on %v\n", httpPort)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%v", httpPort), nil))
+	log.Println("Shutting down gracefully...")
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrader, js jetstream.JetStream, sSess jetstream.Stream) {
@@ -160,7 +184,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, upgrader *websocket
 			log.Println("Error unmarshalling message from worker: ", err)
 			return
 		}
-		err := conn.WriteMessage(websocket.TextMessage, []byte(workerEvent.GetContent()))
+		log.Printf("Received message from NATS for WebSocket session: %s, content: %s", workerEvent.Session, workerEvent.Content)
+		err = conn.WriteMessage(websocket.TextMessage, []byte(workerEvent.GetContent()))
 		if err != nil {
 			log.Println("Error writing message to WebSocket: ", err)
 			return
@@ -179,6 +204,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, upgrader *websocket
 			log.Println("Error receiving message from WebSocket: ", err)
 			break
 		}
+		log.Printf("Received WebSocket message: %s", message)
 
 		workerEvent := &types.WorkerEvent{
 			Session: session,
@@ -195,6 +221,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, upgrader *websocket
 			log.Println("Error publishing message to NATS worker: ", err)
 			break
 		}
+		log.Printf("Published WebSocket message to NATS: %s", message)
 	}
 }
 
